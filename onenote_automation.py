@@ -549,16 +549,19 @@ Content-Type: {content_type}\r
         if not content_type:
             content_type = 'application/octet-stream'
 
-        with open(image_path, 'rb') as image_file:
+        # Optimize image size for faster upload
+        optimized_path = self._optimize_image_for_upload(image_path)
+
+        with open(optimized_path, 'rb') as image_file:
             image_data = image_file.read()
 
         filename = os.path.basename(image_path)
 
-        # Create patch content to append image with one line break
+        # Create patch content with simple image and single line break
         patch_content = f"""[{{
     "target": "body",
     "action": "append",
-    "content": "<br/><img src=\\"name:{filename}\\" alt=\\"{filename}\\" style=\\"max-width: 100%; height: auto;\\" />"
+    "content": "<img src=\\"name:{filename}\\" alt=\\"{filename}\\" style=\\"max-width: 100%; height: auto;\\" /><br/>"
 }}]"""
 
         # Create multipart body
@@ -584,6 +587,13 @@ Content-Type: {content_type}\r
         response = requests.patch(url, headers=headers, data=multipart_body)
         response.raise_for_status()
 
+        # Clean up optimized file if it's different from original
+        if optimized_path != image_path:
+            try:
+                os.unlink(optimized_path)
+            except:
+                pass
+
         print(f"✅ Image '{filename}' added to page successfully!")
         return True
 
@@ -592,7 +602,7 @@ Content-Type: {content_type}\r
         patch_content = [{
             "target": "body",
             "action": "append",
-            "content": f'<br/><img src="{image_url}" alt="Remote Image" style="max-width: 100%; height: auto;" />'
+            "content": f'<img src="{image_url}" alt="Remote Image" style="max-width: 100%; height: auto;" /><br/>'
         }]
 
         headers = self.get_headers()
@@ -671,3 +681,54 @@ Content-Type: {content_type}\r
         except Exception as e:
             print(f"❌ Error: {str(e)}")
             return False
+
+    def _optimize_image_for_upload(self, image_path):
+        """Optimize image for OneNote web version compatibility with fixed 800px width"""
+        if not PIL_AVAILABLE:
+            return image_path
+
+        try:
+            with Image.open(image_path) as img:
+                # Get original size
+                original_size = os.path.getsize(image_path)
+
+                # Fixed width for OneNote web version consistency
+                target_width = 800  # Match OneNote web version default width
+
+                # Always resize to target width maintaining aspect ratio
+                if img.width != target_width:
+                    ratio = target_width / img.width
+                    new_height = int(img.height * ratio)
+                    new_size = (target_width, new_height)
+                    img = img.resize(new_size, Image.Resampling.LANCZOS)
+                    print(f"📏 Resized to OneNote web standard: {img.width}x{img.height} → {new_size[0]}x{new_size[1]}")
+
+                # Convert to RGB if necessary
+                if img.mode in ('RGBA', 'LA'):
+                    background = Image.new('RGB', img.size, (255, 255, 255))
+                    if img.mode == 'RGBA':
+                        background.paste(img, mask=img.split()[-1])
+                    else:
+                        background.paste(img)
+                    img = background
+                elif img.mode != 'RGB':
+                    img = img.convert('RGB')
+
+                # Create optimized temporary file
+                temp_file = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+                optimized_path = temp_file.name
+                temp_file.close()
+
+                # Use high quality for OneNote web compatibility
+                quality = 90  # Higher quality for 800px standard
+                img.save(optimized_path, 'JPEG', quality=quality, optimize=True)
+
+                # Always use the resized version for consistency
+                optimized_size = os.path.getsize(optimized_path)
+                print(f"🗜️ Optimized for OneNote web: {original_size//1024}KB → {optimized_size//1024}KB")
+                return optimized_path
+
+        except Exception as e:
+            print(f"⚠️ Image optimization failed, using original: {str(e)}")
+            return image_path
+
