@@ -1,3 +1,50 @@
+
+    def find_notebook_by_name(self, notebook_name):
+        """Find a notebook by name"""
+        notebooks = self.get_notebooks()
+        for notebook in notebooks:
+            if notebook['displayName'].lower() == notebook_name.lower():
+                return notebook
+        return None
+
+    def find_section_by_name(self, notebook_id, section_name):
+        """Find a section by name within a notebook"""
+        sections = self.get_sections(notebook_id)
+        for section in sections:
+            if section['displayName'].lower() == section_name.lower():
+                return section
+        return None
+
+    def get_supported_image_formats(self):
+        """Get list of supported image formats"""
+        return ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.svg']
+
+    def validate_image_file(self, image_path):
+        """Validate if the image file is supported and exists"""
+        if not os.path.exists(image_path):
+            print(f"❌ Image file not found: {image_path}")
+            return False
+
+        _, ext = os.path.splitext(image_path.lower())
+        if ext not in self.get_supported_image_formats():
+            print(f"❌ Unsupported image format: {ext}")
+            print(f"Supported formats: {', '.join(self.get_supported_image_formats())}")
+            return False
+
+        # Check file size (OneNote has a 100MB limit per attachment)
+        file_size = os.path.getsize(image_path)
+        max_size = 100 * 1024 * 1024  # 100MB in bytes
+        if file_size > max_size:
+            print(f"❌ Image file too large: {file_size / (1024*1024):.2f}MB (max: 100MB)")
+            return False
+
+        print(f"✅ Image file validated: {image_path} ({file_size / 1024:.2f}KB)")
+        return True
+
+    def _get_current_datetime(self):
+        """Get current datetime in ISO format"""
+        from datetime import datetime
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 import os
 import requests
 import json
@@ -7,7 +54,7 @@ import base64
 import mimetypes
 import io
 import tempfile
-from msal import PublicClientApplication, SerializableTokenCache
+from msal import PublicClientApplication
 from dotenv import load_dotenv
 
 try:
@@ -23,12 +70,6 @@ class OneNoteAutomation:
         self.tenant_id = os.getenv('TENANT_ID', 'common')
         self.account_type = os.getenv('ACCOUNT_TYPE', 'personal')
         self.user_email = os.getenv('USER_EMAIL')
-
-        # Default settings from .env
-        self.default_notebook = os.getenv('DEFAULT_NOTEBOOK', '').strip()
-        self.default_section = os.getenv('DEFAULT_SECTION', '').strip()
-        self.default_page = os.getenv('DEFAULT_PAGE', '').strip()
-        self.token_cache_file = os.getenv('TOKEN_CACHE_FILE', '.token_cache.json')
 
         if not self.client_id:
             raise ValueError("Missing CLIENT_ID in environment variables. Please check your .env file.")
@@ -46,53 +87,35 @@ class OneNoteAutomation:
 
         self.graph_url = "https://graph.microsoft.com/v1.0"
 
-        # Initialize token cache
-        self.cache = SerializableTokenCache()
-        if os.path.exists(self.token_cache_file):
-            with open(self.token_cache_file, 'r') as f:
-                self.cache.deserialize(f.read())
-
-        # Use PublicClientApplication with token cache
+        # Use PublicClientApplication for personal accounts
         self.app = PublicClientApplication(
             client_id=self.client_id,
-            authority=self.authority,
-            token_cache=self.cache
+            authority=self.authority
         )
 
         self.access_token = None
         self.account = None
 
-        # Cache for default objects
-        self._cached_notebook = None
-        self._cached_section = None
-        self._cached_page = None
-
-    def _save_token_cache(self):
-        """Save token cache to file for persistence"""
-        if self.cache.has_state_changed:
-            with open(self.token_cache_file, 'w') as f:
-                f.write(self.cache.serialize())
-
-    def authenticate(self, force_reauth=False):
-        """Authenticate with persistent token caching"""
+    def authenticate(self):
+        """Authenticate using interactive browser flow for personal accounts"""
         try:
             # Try to get token silently first (if user has authenticated before)
             accounts = self.app.get_accounts()
-            if accounts and not force_reauth:
-                print("🔄 Using cached authentication...")
+            if accounts:
+                print("Found existing account, attempting silent authentication...")
                 result = self.app.acquire_token_silent(self.scope, account=accounts[0])
                 if result and "access_token" in result:
                     self.access_token = result["access_token"]
                     self.account = accounts[0]
-                    self._save_token_cache()
-                    print("✅ Authentication successful!")
+                    print("✅ Silent authentication successful!")
                     return True
 
             # If silent auth fails, use interactive browser flow
-            print("🔐 Starting authentication...")
+            print("Starting interactive authentication...")
             print("This will open a browser window for authentication.")
 
             try:
+                # Try interactive browser flow first (more reliable)
                 result = self.app.acquire_token_interactive(
                     scopes=self.scope,
                     prompt="select_account"
@@ -100,8 +123,6 @@ class OneNoteAutomation:
 
                 if "access_token" in result:
                     self.access_token = result["access_token"]
-                    self.account = result.get("account")
-                    self._save_token_cache()
                     print("✅ Authentication successful!")
                     return True
                 else:
@@ -109,10 +130,44 @@ class OneNoteAutomation:
 
             except Exception as interactive_error:
                 print(f"Interactive flow failed: {str(interactive_error)}")
-                return False
+                print("Falling back to device code flow...")
+
+                # Fallback to device code flow
+                flow = self.app.initiate_device_flow(scopes=self.scope)
+
+                if "user_code" not in flow:
+                    print(f"Device flow error: {flow.get('error', 'Unknown error')}")
+                    print(f"Error description: {flow.get('error_description', 'No description')}")
+                    raise ValueError("Failed to create device flow")
+
+                print(f"\n🔐 Please visit: {flow['verification_uri']}")
+                print(f"📱 Enter code: {flow['user_code']}")
+                print("\nOpening browser automatically...")
+
+                # Open browser automatically
+                webbrowser.open(flow['verification_uri'])
+
+                input("\nPress Enter after completing authentication in the browser...")
+
+                # Complete the flow
+                result = self.app.acquire_token_by_device_flow(flow)
+
+                if "access_token" in result:
+                    self.access_token = result["access_token"]
+                    print("✅ Authentication successful!")
+                    return True
+                else:
+                    print(f"❌ Device flow authentication failed: {result.get('error_description', 'Unknown error')}")
+                    return False
 
         except Exception as e:
             print(f"❌ Authentication error: {str(e)}")
+            print("\n🔧 Troubleshooting tips:")
+            print("1. Make sure your app registration supports 'Personal Microsoft accounts'")
+            print("2. Check that your CLIENT_ID is correct")
+            print("3. Verify the app has proper redirect URIs configured")
+            print("4. Ensure the app has Notes.ReadWrite permissions")
+            print("5. Add 'http://localhost' as a redirect URI in Azure Portal")
             return False
 
     def get_headers(self):
@@ -415,259 +470,3 @@ Content-Type: {content_type}\r
             print(f"   🌐 Page URL: {web_url}")
 
         return page_data
-
-    def find_notebook_by_name(self, notebook_name):
-        """Find a notebook by name"""
-        notebooks = self.get_notebooks()
-        for notebook in notebooks:
-            if notebook['displayName'].lower() == notebook_name.lower():
-                return notebook
-        return None
-
-    def find_section_by_name(self, notebook_id, section_name):
-        """Find a section by name within a notebook"""
-        sections = self.get_sections(notebook_id)
-        for section in sections:
-            if section['displayName'].lower() == section_name.lower():
-                return section
-        return None
-
-    def get_supported_image_formats(self):
-        """Get list of supported image formats"""
-        return ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.svg']
-
-    def validate_image_file(self, image_path):
-        """Validate if the image file is supported and exists"""
-        if not os.path.exists(image_path):
-            print(f"❌ Image file not found: {image_path}")
-            return False
-
-        _, ext = os.path.splitext(image_path.lower())
-        if ext not in self.get_supported_image_formats():
-            print(f"❌ Unsupported image format: {ext}")
-            print(f"Supported formats: {', '.join(self.get_supported_image_formats())}")
-            return False
-
-        # Check file size (OneNote has a 100MB limit per attachment)
-        file_size = os.path.getsize(image_path)
-        max_size = 100 * 1024 * 1024  # 100MB in bytes
-        if file_size > max_size:
-            print(f"❌ Image file too large: {file_size / (1024*1024):.2f}MB (max: 100MB)")
-            return False
-
-        print(f"✅ Image file validated: {image_path} ({file_size / 1024:.2f}KB)")
-        return True
-
-    def _get_current_datetime(self):
-        """Get current datetime in ISO format"""
-        from datetime import datetime
-        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    def get_or_create_default_page(self):
-        """Get or create the default page based on .env settings"""
-        try:
-            # Get default notebook
-            if not self._cached_notebook:
-                if self.default_notebook:
-                    self._cached_notebook = self.find_notebook_by_name(self.default_notebook)
-                    if not self._cached_notebook:
-                        print(f"❌ Default notebook '{self.default_notebook}' not found.")
-                        return None
-                else:
-                    print("📚 No default notebook specified. Please set DEFAULT_NOTEBOOK in .env file.")
-                    return None
-
-            # Get default section
-            if not self._cached_section:
-                if self.default_section:
-                    self._cached_section = self.find_section_by_name(self._cached_notebook['id'], self.default_section)
-                    if not self._cached_section:
-                        print(f"❌ Default section '{self.default_section}' not found.")
-                        return None
-                else:
-                    print("📂 No default section specified. Please set DEFAULT_SECTION in .env file.")
-                    return None
-
-            # Get or create default page
-            if not self._cached_page:
-                if self.default_page:
-                    self._cached_page = self.find_page_by_name(self._cached_section['id'], self.default_page)
-                    if not self._cached_page:
-                        print(f"📝 Creating new page '{self.default_page}'...")
-                        self._cached_page = self.create_page(self._cached_section['id'], self.default_page, "")
-                    else:
-                        print(f"📄 Using existing page '{self.default_page}'")
-                else:
-                    print("📝 No default page specified. Please set DEFAULT_PAGE in .env file.")
-                    return None
-
-            return self._cached_page
-
-        except Exception as e:
-            print(f"❌ Error getting/creating default page: {str(e)}")
-            return None
-
-    def find_page_by_name(self, section_id, page_name):
-        """Find a page by name within a section"""
-        try:
-            url = f"{self.graph_url}/me/onenote/sections/{section_id}/pages"
-            response = requests.get(url, headers=self.get_headers())
-            response.raise_for_status()
-
-            pages = response.json().get('value', [])
-            for page in pages:
-                if page['title'].lower() == page_name.lower():
-                    return page
-            return None
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Error finding page: {str(e)}")
-            return None
-
-    def add_image_to_page(self, page_id, image_path=None, image_url=None):
-        """Add an image to an existing OneNote page"""
-        try:
-            url = f"{self.graph_url}/me/onenote/pages/{page_id}/content"
-
-            if image_path and os.path.exists(image_path):
-                return self._add_local_image_to_page(url, image_path)
-            elif image_url:
-                return self._add_remote_image_to_page(url, image_url)
-            else:
-                print("❌ No valid image path or URL provided")
-                return False
-
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Error adding image to page: {str(e)}")
-            return False
-
-    def _add_local_image_to_page(self, url, image_path):
-        """Add a local image to an existing page using PATCH request"""
-        import uuid
-
-        boundary = f"Part_{uuid.uuid4().hex}"
-        content_type, _ = mimetypes.guess_type(image_path)
-        if not content_type:
-            content_type = 'application/octet-stream'
-
-        with open(image_path, 'rb') as image_file:
-            image_data = image_file.read()
-
-        filename = os.path.basename(image_path)
-
-        # Create patch content to append image with one line break
-        patch_content = f"""[{{
-    "target": "body",
-    "action": "append",
-    "content": "<br/><img src=\\"name:{filename}\\" alt=\\"{filename}\\" style=\\"max-width: 100%; height: auto;\\" />"
-}}]"""
-
-        # Create multipart body
-        multipart_body = f"""--{boundary}\r
-Content-Disposition: form-data; name="Commands"\r
-Content-Type: application/json\r
-\r
-{patch_content}\r
---{boundary}\r
-Content-Disposition: form-data; name="{filename}"\r
-Content-Type: {content_type}\r
-\r
-""".encode('utf-8')
-
-        multipart_body += image_data
-        multipart_body += f"\r\n--{boundary}--\r\n".encode('utf-8')
-
-        headers = {
-            'Authorization': f'Bearer {self.access_token}',
-            'Content-Type': f'multipart/form-data; boundary={boundary}'
-        }
-
-        response = requests.patch(url, headers=headers, data=multipart_body)
-        response.raise_for_status()
-
-        print(f"✅ Image '{filename}' added to page successfully!")
-        return True
-
-    def _add_remote_image_to_page(self, url, image_url):
-        """Add a remote image to an existing page using PATCH request"""
-        patch_content = [{
-            "target": "body",
-            "action": "append",
-            "content": f'<br/><img src="{image_url}" alt="Remote Image" style="max-width: 100%; height: auto;" />'
-        }]
-
-        headers = self.get_headers()
-        response = requests.patch(url, headers=headers, json=patch_content)
-        response.raise_for_status()
-
-        print(f"✅ Remote image added to page successfully!")
-        return True
-
-    def quick_add_clipboard_image(self):
-        """Quick add clipboard image to default page - main hotkey function"""
-        if not PIL_AVAILABLE:
-            print("❌ PIL (Pillow) library not installed. Please install it with: pip install Pillow")
-            return False
-
-        # Ensure authentication
-        if not self.access_token:
-            if not self.authenticate():
-                print("❌ Authentication failed")
-                return False
-
-        # Get clipboard image
-        try:
-            clipboard_image = ImageGrab.grabclipboard()
-
-            if clipboard_image is None:
-                print("❌ No image found in clipboard")
-                return False
-
-            if not isinstance(clipboard_image, Image.Image):
-                print("❌ Clipboard content is not an image")
-                return False
-
-            print(f"📋 Image found: {clipboard_image.size[0]}x{clipboard_image.size[1]} pixels")
-
-            # Get or create default page
-            page = self.get_or_create_default_page()
-            if not page:
-                print("❌ Could not get/create default page")
-                return False
-
-            # Save clipboard image to temporary file
-            temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-            temp_path = temp_file.name
-            temp_file.close()
-
-            # Convert image if necessary
-            if clipboard_image.mode in ('RGBA', 'LA'):
-                background = Image.new('RGB', clipboard_image.size, (255, 255, 255))
-                if clipboard_image.mode == 'RGBA':
-                    background.paste(clipboard_image, mask=clipboard_image.split()[-1])
-                else:
-                    background.paste(clipboard_image)
-                clipboard_image = background
-            elif clipboard_image.mode != 'RGB':
-                clipboard_image = clipboard_image.convert('RGB')
-
-            clipboard_image.save(temp_path, 'PNG', optimize=True)
-
-            # Add image to page
-            result = self.add_image_to_page(page['id'], image_path=temp_path)
-
-            # Clean up
-            try:
-                os.unlink(temp_path)
-            except:
-                pass
-
-            if result:
-                print(f"✅ Image added to page '{page['title']}' successfully!")
-                return True
-            else:
-                print("❌ Failed to add image to page")
-                return False
-
-        except Exception as e:
-            print(f"❌ Error: {str(e)}")
-            return False
