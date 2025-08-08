@@ -683,7 +683,7 @@ Content-Type: {content_type}\r
             return False
 
     def _optimize_image_for_upload(self, image_path):
-        """Optimize image for OneNote web version compatibility with fixed 800px width"""
+        """Optimize image for OneNote upload - pre-compress since OneNote will compress anyway"""
         if not PIL_AVAILABLE:
             return image_path
 
@@ -692,18 +692,9 @@ Content-Type: {content_type}\r
                 # Get original size
                 original_size = os.path.getsize(image_path)
 
-                # Fixed width for OneNote web version consistency
-                target_width = 800  # Match OneNote web version default width
+                print(f"📏 Original image: {img.width}x{img.height} pixels")
 
-                # Always resize to target width maintaining aspect ratio
-                if img.width != target_width:
-                    ratio = target_width / img.width
-                    new_height = int(img.height * ratio)
-                    new_size = (target_width, new_height)
-                    img = img.resize(new_size, Image.Resampling.LANCZOS)
-                    print(f"📏 Resized to OneNote web standard: {img.width}x{img.height} → {new_size[0]}x{new_size[1]}")
-
-                # Convert to RGB if necessary
+                # Convert to RGB if necessary (but keep original dimensions)
                 if img.mode in ('RGBA', 'LA'):
                     background = Image.new('RGB', img.size, (255, 255, 255))
                     if img.mode == 'RGBA':
@@ -714,21 +705,19 @@ Content-Type: {content_type}\r
                 elif img.mode != 'RGB':
                     img = img.convert('RGB')
 
-                # Create optimized temporary file
+                # Create temporary file with JPEG format for faster upload
                 temp_file = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
                 optimized_path = temp_file.name
                 temp_file.close()
 
-                # Use high quality for OneNote web compatibility
-                quality = 90  # Higher quality for 800px standard
-                img.save(optimized_path, 'JPEG', quality=quality, optimize=True)
+                # Save as JPEG with high quality (85%) - OneNote will compress anyway
+                # This reduces upload time while maintaining good visual quality
+                img.save(optimized_path, 'JPEG', quality=85, optimize=True)
 
-                # Always use the resized version for consistency
                 optimized_size = os.path.getsize(optimized_path)
-                print(f"🗜️ Optimized for OneNote web: {original_size//1024}KB → {optimized_size//1024}KB")
+                print(f"🚀 Pre-compressed for faster upload: {original_size//1024}KB → {optimized_size//1024}KB")
                 return optimized_path
 
         except Exception as e:
             print(f"⚠️ Image optimization failed, using original: {str(e)}")
             return image_path
-
