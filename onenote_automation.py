@@ -171,8 +171,9 @@ class OneNoteAutomation:
             import html
             escaped_title = html.escape(page_title)
 
-            # Create HTML content for the page with preserved formatting
-            html_content = f"""<!DOCTYPE html>
+            # Create HTML content for the page - only add heading if there's content
+            if page_content.strip():
+                html_content = f"""<!DOCTYPE html>
 <html>
 <head>
     <title>{escaped_title}</title>
@@ -180,7 +181,19 @@ class OneNoteAutomation:
 </head>
 <body>
     <h1>{escaped_title}</h1>
-    {f'<p>{page_content}</p>' if page_content else ''}
+    <p>{page_content}</p>
+</body>
+</html>"""
+            else:
+                # For empty content, create minimal page without duplicate title in body
+                html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>{escaped_title}</title>
+    <meta name="created" content="{self._get_current_datetime()}" />
+</head>
+<body>
+    <p></p>
 </body>
 </html>"""
 
@@ -402,22 +415,35 @@ Content-Type: {content_type}\r
             'Content-Type': f'multipart/form-data; boundary={boundary}'
         }
 
-        response = requests.post(url, headers=headers, data=multipart_body)
-        response.raise_for_status()
+        try:
+            response = requests.post(url, headers=headers, data=multipart_body)
+            response.raise_for_status()
 
-        page_data = response.json()
-        print(f"✅ Page with local image created successfully!")
-        print(f"   📄 Page ID: {page_data.get('id')}")
+            page_data = response.json()
+            print(f"✅ Page with image created successfully!")
+            print(f"   📄 Page ID: {page_data.get('id')}")
 
-        # Try to get the web URL
-        web_url = page_data.get('links', {}).get('oneNoteWebUrl', {}).get('href')
-        if web_url:
-            print(f"   🌐 Page URL: {web_url}")
+            # Try to get the web URL
+            web_url = page_data.get('links', {}).get('oneNoteWebUrl', {}).get('href')
+            if web_url:
+                print(f"   🌐 Page URL: {web_url}")
 
-        return page_data
+            return page_data
+
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Error creating page with image: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"Response status: {e.response.status_code}")
+                print(f"Response text: {e.response.text}")
+            return None
+
+    def _get_current_datetime(self):
+        """Get current datetime in ISO format"""
+        from datetime import datetime
+        return datetime.now().isoformat()
 
     def find_notebook_by_name(self, notebook_name):
-        """Find a notebook by name"""
+        """Find a notebook by name (case-insensitive)"""
         notebooks = self.get_notebooks()
         for notebook in notebooks:
             if notebook['displayName'].lower() == notebook_name.lower():
@@ -425,299 +451,165 @@ Content-Type: {content_type}\r
         return None
 
     def find_section_by_name(self, notebook_id, section_name):
-        """Find a section by name within a notebook"""
+        """Find a section by name in a specific notebook (case-insensitive)"""
         sections = self.get_sections(notebook_id)
         for section in sections:
             if section['displayName'].lower() == section_name.lower():
                 return section
         return None
 
-    def get_supported_image_formats(self):
-        """Get list of supported image formats"""
-        return ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.svg']
-
-    def validate_image_file(self, image_path):
-        """Validate if the image file is supported and exists"""
-        if not os.path.exists(image_path):
-            print(f"❌ Image file not found: {image_path}")
-            return False
-
-        _, ext = os.path.splitext(image_path.lower())
-        if ext not in self.get_supported_image_formats():
-            print(f"❌ Unsupported image format: {ext}")
-            print(f"Supported formats: {', '.join(self.get_supported_image_formats())}")
-            return False
-
-        # Check file size (OneNote has a 100MB limit per attachment)
-        file_size = os.path.getsize(image_path)
-        max_size = 100 * 1024 * 1024  # 100MB in bytes
-        if file_size > max_size:
-            print(f"❌ Image file too large: {file_size / (1024*1024):.2f}MB (max: 100MB)")
-            return False
-
-        print(f"✅ Image file validated: {image_path} ({file_size / 1024:.2f}KB)")
-        return True
-
-    def _get_current_datetime(self):
-        """Get current datetime in ISO format"""
-        from datetime import datetime
-        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    def get_or_create_default_page(self):
-        """Get or create the default page based on .env settings"""
-        try:
-            # Get default notebook
-            if not self._cached_notebook:
-                if self.default_notebook:
-                    self._cached_notebook = self.find_notebook_by_name(self.default_notebook)
-                    if not self._cached_notebook:
-                        print(f"❌ Default notebook '{self.default_notebook}' not found.")
-                        return None
-                else:
-                    print("📚 No default notebook specified. Please set DEFAULT_NOTEBOOK in .env file.")
-                    return None
-
-            # Get default section
-            if not self._cached_section:
-                if self.default_section:
-                    self._cached_section = self.find_section_by_name(self._cached_notebook['id'], self.default_section)
-                    if not self._cached_section:
-                        print(f"❌ Default section '{self.default_section}' not found.")
-                        return None
-                else:
-                    print("📂 No default section specified. Please set DEFAULT_SECTION in .env file.")
-                    return None
-
-            # Get or create default page
-            if not self._cached_page:
-                if self.default_page:
-                    self._cached_page = self.find_page_by_name(self._cached_section['id'], self.default_page)
-                    if not self._cached_page:
-                        print(f"📝 Creating new page '{self.default_page}'...")
-                        self._cached_page = self.create_page(self._cached_section['id'], self.default_page, "")
-                    else:
-                        print(f"📄 Using existing page '{self.default_page}'")
-                else:
-                    print("📝 No default page specified. Please set DEFAULT_PAGE in .env file.")
-                    return None
-
-            return self._cached_page
-
-        except Exception as e:
-            print(f"❌ Error getting/creating default page: {str(e)}")
-            return None
-
-    def find_page_by_name(self, section_id, page_name):
-        """Find a page by name within a section"""
+    def get_pages(self, section_id):
+        """Get all pages in a section"""
         try:
             url = f"{self.graph_url}/me/onenote/sections/{section_id}/pages"
             response = requests.get(url, headers=self.get_headers())
             response.raise_for_status()
 
             pages = response.json().get('value', [])
+            print(f"📄 Found {len(pages)} pages:")
             for page in pages:
-                if page['title'].lower() == page_name.lower():
-                    return page
-            return None
+                print(f"  📝 {page['title']} (ID: {page['id']})")
+
+            return pages
         except requests.exceptions.RequestException as e:
-            print(f"❌ Error finding page: {str(e)}")
-            return None
+            print(f"❌ Error getting pages: {str(e)}")
+            return []
 
-    def add_image_to_page(self, page_id, image_path=None, image_url=None):
-        """Add an image to an existing OneNote page"""
-        try:
-            url = f"{self.graph_url}/me/onenote/pages/{page_id}/content"
+    def find_page_by_title(self, section_id, page_title):
+        """Find a page by title in a specific section (case-insensitive)"""
+        pages = self.get_pages(section_id)
+        for page in pages:
+            if page['title'].lower() == page_title.lower():
+                return page
+        return None
 
-            if image_path and os.path.exists(image_path):
-                return self._add_local_image_to_page(url, image_path)
-            elif image_url:
-                return self._add_remote_image_to_page(url, image_url)
+    def create_multiple_pages(self, section_id, page_titles, page_content=""):
+        """Create multiple pages with given titles"""
+        created_pages = []
+        failed_pages = []
+
+        print(f"📝 Creating {len(page_titles)} pages...")
+
+        for i, title in enumerate(page_titles, 1):
+            print(f"Creating page {i}/{len(page_titles)}: '{title}'")
+
+            page_data = self.create_page(section_id, title, page_content)
+            if page_data:
+                created_pages.append(page_data)
+                print(f"✅ Created: '{title}'")
             else:
-                print("❌ No valid image path or URL provided")
-                return False
+                failed_pages.append(title)
+                print(f"❌ Failed: '{title}'")
 
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Error adding image to page: {str(e)}")
-            return False
+        print(f"\n📊 Summary:")
+        print(f"✅ Successfully created: {len(created_pages)} pages")
+        if failed_pages:
+            print(f"❌ Failed to create: {len(failed_pages)} pages")
+            for title in failed_pages:
+                print(f"   - {title}")
 
-    def _add_local_image_to_page(self, url, image_path):
-        """Add a local image to an existing page using PATCH request"""
-        import uuid
+        return created_pages, failed_pages
 
-        boundary = f"Part_{uuid.uuid4().hex}"
-        content_type, _ = mimetypes.guess_type(image_path)
-        if not content_type:
-            content_type = 'application/octet-stream'
-
-        # Optimize image size for faster upload
-        optimized_path = self._optimize_image_for_upload(image_path)
-
-        with open(optimized_path, 'rb') as image_file:
-            image_data = image_file.read()
-
-        filename = os.path.basename(image_path)
-
-        # Create patch content with simple image and single line break
-        patch_content = f"""[{{
-    "target": "body",
-    "action": "append",
-    "content": "<img src=\\"name:{filename}\\" alt=\\"{filename}\\" style=\\"max-width: 100%; height: auto;\\" /><br/>"
-}}]"""
-
-        # Create multipart body
-        multipart_body = f"""--{boundary}\r
-Content-Disposition: form-data; name="Commands"\r
-Content-Type: application/json\r
-\r
-{patch_content}\r
---{boundary}\r
-Content-Disposition: form-data; name="{filename}"\r
-Content-Type: {content_type}\r
-\r
-""".encode('utf-8')
-
-        multipart_body += image_data
-        multipart_body += f"\r\n--{boundary}--\r\n".encode('utf-8')
-
-        headers = {
-            'Authorization': f'Bearer {self.access_token}',
-            'Content-Type': f'multipart/form-data; boundary={boundary}'
-        }
-
-        response = requests.patch(url, headers=headers, data=multipart_body)
-        response.raise_for_status()
-
-        # Clean up optimized file if it's different from original
-        if optimized_path != image_path:
-            try:
-                os.unlink(optimized_path)
-            except:
-                pass
-
-        print(f"✅ Image '{filename}' added to page successfully!")
-        return True
-
-    def _add_remote_image_to_page(self, url, image_url):
-        """Add a remote image to an existing page using PATCH request"""
-        patch_content = [{
-            "target": "body",
-            "action": "append",
-            "content": f'<img src="{image_url}" alt="Remote Image" style="max-width: 100%; height: auto;" /><br/>'
-        }]
-
-        headers = self.get_headers()
-        response = requests.patch(url, headers=headers, json=patch_content)
-        response.raise_for_status()
-
-        print(f"✅ Remote image added to page successfully!")
-        return True
-
-    def quick_add_clipboard_image(self):
-        """Quick add clipboard image to default page - main hotkey function"""
-        if not PIL_AVAILABLE:
-            print("❌ PIL (Pillow) library not installed. Please install it with: pip install Pillow")
-            return False
-
-        # Ensure authentication
-        if not self.access_token:
-            if not self.authenticate():
-                print("❌ Authentication failed")
-                return False
-
-        # Get clipboard image
-        try:
-            clipboard_image = ImageGrab.grabclipboard()
-
-            if clipboard_image is None:
-                print("❌ No image found in clipboard")
-                return False
-
-            if not isinstance(clipboard_image, Image.Image):
-                print("❌ Clipboard content is not an image")
-                return False
-
-            print(f"📋 Image found: {clipboard_image.size[0]}x{clipboard_image.size[1]} pixels")
-
-            # Get or create default page
-            page = self.get_or_create_default_page()
-            if not page:
-                print("❌ Could not get/create default page")
-                return False
-
-            # Save clipboard image to temporary file
-            temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-            temp_path = temp_file.name
-            temp_file.close()
-
-            # Convert image if necessary
-            if clipboard_image.mode in ('RGBA', 'LA'):
-                background = Image.new('RGB', clipboard_image.size, (255, 255, 255))
-                if clipboard_image.mode == 'RGBA':
-                    background.paste(clipboard_image, mask=clipboard_image.split()[-1])
+    def get_default_notebook(self):
+        """Get or cache the default notebook"""
+        if self._cached_notebook is None:
+            if self.default_notebook:
+                print(f"🔍 Looking for default notebook: '{self.default_notebook}'")
+                self._cached_notebook = self.find_notebook_by_name(self.default_notebook)
+                if self._cached_notebook:
+                    print(f"✅ Found default notebook: '{self._cached_notebook['displayName']}'")
                 else:
-                    background.paste(clipboard_image)
-                clipboard_image = background
-            elif clipboard_image.mode != 'RGB':
-                clipboard_image = clipboard_image.convert('RGB')
-
-            clipboard_image.save(temp_path, 'PNG', optimize=True)
-
-            # Add image to page
-            result = self.add_image_to_page(page['id'], image_path=temp_path)
-
-            # Clean up
-            try:
-                os.unlink(temp_path)
-            except:
-                pass
-
-            if result:
-                print(f"✅ Image added to page '{page['title']}' successfully!")
-                return True
+                    print(f"❌ Default notebook '{self.default_notebook}' not found")
             else:
-                print("❌ Failed to add image to page")
-                return False
+                print("❌ No default notebook specified in .env file")
 
-        except Exception as e:
-            print(f"❌ Error: {str(e)}")
-            return False
+        return self._cached_notebook
 
-    def _optimize_image_for_upload(self, image_path):
-        """Optimize image for OneNote upload - pre-compress since OneNote will compress anyway"""
-        if not PIL_AVAILABLE:
-            return image_path
+    def get_default_section(self):
+        """Get or cache the default section"""
+        if self._cached_section is None:
+            notebook = self.get_default_notebook()
+            if notebook and self.default_section:
+                print(f"🔍 Looking for default section: '{self.default_section}'")
+                self._cached_section = self.find_section_by_name(notebook['id'], self.default_section)
+                if self._cached_section:
+                    print(f"✅ Found default section: '{self._cached_section['displayName']}'")
+                else:
+                    print(f"❌ Default section '{self.default_section}' not found")
+            else:
+                if not notebook:
+                    print("❌ Cannot find default section without default notebook")
+                else:
+                    print("❌ No default section specified in .env file")
 
-        try:
-            with Image.open(image_path) as img:
-                # Get original size
-                original_size = os.path.getsize(image_path)
+        return self._cached_section
 
-                print(f"📏 Original image: {img.width}x{img.height} pixels")
+    def quick_create_page(self, page_title, page_content=""):
+        """Quickly create a page using default notebook and section"""
+        section = self.get_default_section()
+        if section:
+            return self.create_page(section['id'], page_title, page_content)
+        else:
+            print("❌ Cannot create page: no default section available")
+            return None
 
-                # Convert to RGB if necessary (but keep original dimensions)
-                if img.mode in ('RGBA', 'LA'):
-                    background = Image.new('RGB', img.size, (255, 255, 255))
-                    if img.mode == 'RGBA':
-                        background.paste(img, mask=img.split()[-1])
-                    else:
-                        background.paste(img)
-                    img = background
-                elif img.mode != 'RGB':
-                    img = img.convert('RGB')
+    def reset_cache(self):
+        """Reset cached notebook, section, and page objects"""
+        self._cached_notebook = None
+        self._cached_section = None
+        self._cached_page = None
+        print("🔄 Cache reset")
 
-                # Create temporary file with JPEG format for faster upload
-                temp_file = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
-                optimized_path = temp_file.name
-                temp_file.close()
+    def list_all_structure(self):
+        """List all notebooks, sections, and pages in a hierarchical view"""
+        print("🏗️ OneNote Structure:")
+        print("=" * 50)
 
-                # Save as JPEG with high quality (85%) - OneNote will compress anyway
-                # This reduces upload time while maintaining good visual quality
-                img.save(optimized_path, 'JPEG', quality=85, optimize=True)
+        notebooks = self.get_notebooks()
 
-                optimized_size = os.path.getsize(optimized_path)
-                print(f"🚀 Pre-compressed for faster upload: {original_size//1024}KB → {optimized_size//1024}KB")
-                return optimized_path
+        for notebook in notebooks:
+            print(f"📚 {notebook['displayName']}")
+            sections = self.get_sections(notebook['id'])
 
-        except Exception as e:
-            print(f"⚠️ Image optimization failed, using original: {str(e)}")
-            return image_path
+            for section in sections:
+                print(f"  📂 {section['displayName']}")
+                pages = self.get_pages(section['id'])
+
+                for page in pages:
+                    print(f"    📄 {page['title']}")
+
+                if not pages:
+                    print("    (no pages)")
+
+            if not sections:
+                print("  (no sections)")
+
+        if not notebooks:
+            print("(no notebooks)")
+
+def main():
+    """Demo function to test the automation"""
+    try:
+        onenote = OneNoteAutomation()
+
+        # Authenticate
+        if not onenote.authenticate():
+            print("❌ Authentication failed")
+            return
+
+        # List structure
+        onenote.list_all_structure()
+
+        # Try to create a test page using defaults
+        test_page = onenote.quick_create_page("Test Page", "This is a test page created by automation.")
+
+        if test_page:
+            print("✅ Test completed successfully!")
+        else:
+            print("❌ Test failed")
+
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+
+if __name__ == "__main__":
+    main()
